@@ -1,5 +1,5 @@
 """
-Pocket Option GME_otc Candle Streamer
+Pocket Option COIN_otc Candle Streamer
 Runs on Railway, serves candles via HTTP + WebSocket to the frontend.
 """
 
@@ -27,9 +27,9 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "GME_otc"
+ASSET = "COIN_otc"
 TIMEFRAME_SECONDS = 10          # 10-second candles
-MAX_CANDLES = 500               # Keep last 500 candles in memory
+MAX_CANDLES = 2000               # Keep last 2000 candles in memory
 
 # ============================================================
 # SHARED STATE
