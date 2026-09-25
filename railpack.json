@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.railpack.com",
+  "provider": "python",
+  "packages": {
+    "python": "3.11",
+    "rust": "stable"
+  },
+  "buildAptPackages": ["...", "build-essential", "pkg-config", "libssl-dev"],
+  "steps": {
+    "install": {
+      "commands": [
+        "pip install --upgrade pip",
+        "pip install -r requirements.txt"
+      ]
+    }
+  },
+  "deploy": {
+    "startCommand": "gunicorn app:app --bind 0.0.0.0:${PORT:-8080} --timeout 120"
+  }
+}
