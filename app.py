@@ -1,5 +1,5 @@
 """
-Pocket Option VIX_otc Candle Streamer
+Pocket Option NGNUSD_otc Candle Streamer
 Runs on Railway, serves candles via HTTP + WebSocket to the frontend.
 """
 
@@ -27,7 +27,7 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "VIX_otc"
+ASSET = "NGNUSD_otc"
 TIMEFRAME_SECONDS = 60          # 1 minute candles
 MAX_CANDLES = 2000               # Keep last 2000 candles in memory
 
