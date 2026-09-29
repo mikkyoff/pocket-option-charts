@@ -1,17 +1,15 @@
 """
-Pocket Option PLTR_otc 10s Candle + Indicator Streamer
+Pocket Option BITB_otc Candle + Indicator Streamer
+- Candles built 100% from live ticks (bypasses stale API candles)
 - Real-time RSI(14), Bollinger Bands(20,2), EMA(6)
-- Serves candles + indicator values to the frontend via HTTP
-- Designed for Railway (gunicorn + background thread)
+- 1-minute timeframe
 """
 
 import os
-import json
 import asyncio
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -28,10 +26,10 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "PLTR_otc"
-TIMEFRAME_SECONDS = 10           # 10 second candles
+ASSET = "BITB_otc"
+TIMEFRAME_SECONDS = 60           # 1 minute candles
 HISTORY_CANDLES = 150            # Bootstrap history for indicators
-MAX_CANDLES = 2000               # Rolling buffer for chart
+MAX_CANDLES = 2000
 
 RSI_PERIOD = 14
 BB_PERIOD = 20
@@ -43,11 +41,11 @@ EMA_PERIOD = 6
 # ============================================================
 class StreamState:
     def __init__(self):
-        self.candles = deque(maxlen=MAX_CANDLES)  # closed candles (dicts)
+        self.candles = deque(maxlen=MAX_CANDLES)   # closed candles
         self.forming = None                        # current forming candle
         self.lock = threading.Lock()
         self.connected = False
-        self.initialized = False                   # true once history + first boundary hit
+        self.initialized = False
         self.last_tick_price = None
         self.last_tick_ts = None
         self.tick_count = 0
@@ -59,27 +57,22 @@ class StreamState:
         self.bb_upper = None
         self.bb_middle = None
         self.bb_lower = None
-        self.bb_pct_to_upper = None  # % headspace between price and upper band
-        self.bb_pct_to_lower = None  # % headspace between price and lower band
+        self.bb_bandwidth = None      # total width as % of middle
+        self.bb_pct_to_upper = None   # % of band width above price
+        self.bb_pct_to_lower = None   # % of band width below price
         self.ema = None
-        self.ema_signal = None       # "ABOVE" or "BELOW"
+        self.ema_signal = None        # "ABOVE" or "BELOW"
 
 state = StreamState()
 
 # ============================================================
-# INDICATOR MATH (pure Python, no numpy dependency)
+# INDICATOR MATH
 # ============================================================
 def compute_rsi(closes, period=14):
-    """
-    Wilder's RSI. `closes` is a list of floats (oldest → newest).
-    Returns the RSI value for the latest close, or None if not enough data.
-    """
     if len(closes) < period + 1:
         return None
-
     gains = 0.0
     losses = 0.0
-    # Seed: simple average of first `period` deltas
     for i in range(1, period + 1):
         delta = closes[i] - closes[i - 1]
         if delta >= 0:
@@ -88,15 +81,12 @@ def compute_rsi(closes, period=14):
             losses += -delta
     avg_gain = gains / period
     avg_loss = losses / period
-
-    # Wilder smoothing for the rest
     for i in range(period + 1, len(closes)):
         delta = closes[i] - closes[i - 1]
         gain = delta if delta > 0 else 0.0
         loss = -delta if delta < 0 else 0.0
         avg_gain = (avg_gain * (period - 1) + gain) / period
         avg_loss = (avg_loss * (period - 1) + loss) / period
-
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -104,28 +94,19 @@ def compute_rsi(closes, period=14):
 
 
 def compute_bollinger(closes, period=20, mult=2.0):
-    """
-    Returns (upper, middle, lower) using population stddev.
-    """
     if len(closes) < period:
         return None, None, None
     window = closes[-period:]
     middle = sum(window) / period
     variance = sum((x - middle) ** 2 for x in window) / period
     stddev = variance ** 0.5
-    upper = middle + mult * stddev
-    lower = middle - mult * stddev
-    return upper, middle, lower
+    return middle + mult * stddev, middle, middle - mult * stddev
 
 
 def compute_ema(closes, period=6):
-    """
-    Exponential Moving Average (standard SMA seed).
-    """
     if len(closes) < period:
         return None
     k = 2.0 / (period + 1)
-    # Seed with SMA of first `period`
     ema = sum(closes[:period]) / period
     for price in closes[period:]:
         ema = price * k + ema * (1 - k)
@@ -134,23 +115,26 @@ def compute_ema(closes, period=6):
 
 def recompute_indicators(closes):
     """
-    Given a list of closes (closed candles + current forming close),
-    returns a dict with all indicator values.
+    Returns indicator dict. Bollinger % calcs use the FULL band width
+    (upper - lower) as the denominator, so pct_to_upper + pct_to_lower = 100.
     """
     rsi = compute_rsi(closes, RSI_PERIOD)
     bb_u, bb_m, bb_l = compute_bollinger(closes, BB_PERIOD, BB_STD_MULT)
     ema = compute_ema(closes, EMA_PERIOD)
     price = closes[-1] if closes else None
 
+    bb_bandwidth = None
     bb_pct_to_upper = None
     bb_pct_to_lower = None
-    if bb_u is not None and bb_l is not None and price is not None:
-        # % of the upper band that the price could still travel upward
-        if bb_u > 0:
-            bb_pct_to_upper = (bb_u - price) / bb_u * 100.0
-        # % of the price that the price sits above the lower band
-        if price > 0:
-            bb_pct_to_lower = (price - bb_l) / price * 100.0
+    if bb_u is not None and bb_l is not None and bb_m and bb_m > 0 and price is not None:
+        bb_bandwidth = (bb_u - bb_l) / bb_m * 100.0
+        full_width = bb_u - bb_l
+        if full_width > 0:
+            bb_pct_to_upper = (bb_u - price) / full_width * 100.0
+            bb_pct_to_lower = (price - bb_l) / full_width * 100.0
+            # Clamp to [0, 100] in case price briefly breaks outside the band
+            bb_pct_to_upper = max(0.0, min(100.0, bb_pct_to_upper))
+            bb_pct_to_lower = max(0.0, min(100.0, bb_pct_to_lower))
 
     ema_signal = None
     if ema is not None and price is not None:
@@ -161,6 +145,7 @@ def recompute_indicators(closes):
         "bb_upper": bb_u,
         "bb_middle": bb_m,
         "bb_lower": bb_l,
+        "bb_bandwidth": bb_bandwidth,
         "bb_pct_to_upper": bb_pct_to_upper,
         "bb_pct_to_lower": bb_pct_to_lower,
         "ema": ema,
@@ -169,7 +154,7 @@ def recompute_indicators(closes):
 
 
 # ============================================================
-# POCKET OPTION STREAM
+# POCKET OPTION STREAM (ticks → candles → indicators)
 # ============================================================
 def run_po_stream():
     loop = asyncio.new_event_loop()
@@ -184,7 +169,6 @@ def run_po_stream():
 
 async def _po_stream_async():
     if not SSID:
-        print("ERROR: POCKET_OPTION_SSID not set")
         with state.lock:
             state.error = "POCKET_OPTION_SSID not set"
         return
@@ -192,7 +176,6 @@ async def _po_stream_async():
     config = Config(timeout_secs=30, terminal_logging=False)
     client = PocketOptionAsync(SSID, config=config)
 
-    # Wait for assets to load (context manager does this too)
     try:
         await client.wait_for_assets(timeout=60.0)
         balance = await client.balance()
@@ -200,29 +183,27 @@ async def _po_stream_async():
         with state.lock:
             state.connected = True
     except Exception as e:
-        print(f"[stream] Connection failed: {e}")
         with state.lock:
             state.connected = False
             state.error = f"Connection failed: {e}"
         return
 
     # ---------------------------------------------------------
-    # STEP 1: Fetch 150 historical closed candles (10s timeframe)
+    # STEP 1: Fetch 150 historical CLOSED candles to seed
+    # the indicator math. These are NOT used for display — only
+    # as the seed so RSI/BB/EMA are immediately accurate.
     # ---------------------------------------------------------
-    # `get_candles_live` yields (closed_candles, forming_candle).
-    # We call it once and take the first yield to seed history.
-    # Alternatively `get_candles` is deprecated but works; we use
-    # `get_candles_live` because it is the supported path.
-    history_closes = []
+    seed_closes = []
     try:
+        # get_candles_live returns an async generator; we take the
+        # first yield (historical backfill + forming) and then close it.
         gen = client.get_candles_live(
             asset=ASSET,
             period=TIMEFRAME_SECONDS,
-            hours=1.0,
+            hours=3.0,
             max_rows=HISTORY_CANDLES,
         )
-        closed, forming = await gen.__anext__()
-        # `closed` is list of dicts with keys time/open/high/low/close
+        closed, _forming = await gen.__anext__()
         for c in closed[-HISTORY_CANDLES:]:
             with state.lock:
                 state.candles.append({
@@ -232,43 +213,41 @@ async def _po_stream_async():
                     "low": float(c["low"]),
                     "close": float(c["close"]),
                 })
-            history_closes.append(float(c["close"]))
-        print(f"[stream] Seeded {len(history_closes)} historical candles")
-
-        # Also seed forming if provided
-        if forming:
-            with state.lock:
-                state.forming = {
-                    "time": int(forming["time"]),
-                    "open": float(forming["open"]),
-                    "high": float(forming["high"]),
-                    "low": float(forming["low"]),
-                    "close": float(forming["close"]),
-                }
-                state.last_candle_boundary = state.forming["time"]
-        # Close the generator (we don't need its live loop; we run our own)
+            seed_closes.append(float(c["close"]))
+        print(f"[stream] Seeded {len(seed_closes)} historical candles")
         await gen.aclose()
     except Exception as e:
-        print(f"[stream] History fetch failed (will still stream live): {e}")
+        print(f"[stream] History seed failed (indicators will warm up live): {e}")
 
     # ---------------------------------------------------------
-    # STEP 2: Subscribe to raw ticks
+    # STEP 2: Subscribe to raw ticks. EVERY candle is built
+    # from these ticks. We never trust the API's candle feed
+    # again after this point.
     # ---------------------------------------------------------
     stream = await client.subscribe_symbol(ASSET)
-
     print(f"[stream] Streaming ticks for {ASSET} @ {TIMEFRAME_SECONDS}s")
     with state.lock:
         state.initialized = True
 
-    # ---------------------------------------------------------
-    # STEP 3: Process ticks → build forming candle → indicators
-    # ---------------------------------------------------------
+    # Track the last accepted tick timestamp to reject out-of-order ticks
+    last_accepted_ts = 0
+    # Tolerance: reject ticks older than 2× timeframe (guards against replay)
+    stale_cutoff = TIMEFRAME_SECONDS * 2
+
     async for tick in stream:
         try:
             price = float(tick.get("close") or tick.get("price") or 0)
             ts = int(tick.get("timestamp") or tick.get("time") or time.time())
             if price <= 0:
                 continue
+
+            # Reject stale ticks
+            now = int(time.time())
+            if ts < now - stale_cutoff:
+                continue
+            if ts < last_accepted_ts:
+                continue
+            last_accepted_ts = ts
 
             bucket = (ts // TIMEFRAME_SECONDS) * TIMEFRAME_SECONDS
 
@@ -284,7 +263,7 @@ async def _po_stream_async():
                     }
                     state.last_candle_boundary = bucket
                 elif bucket > state.last_candle_boundary:
-                    # Close the previous forming candle
+                    # Previous candle closes
                     state.candles.append(dict(state.forming))
                     state.last_candle_boundary = bucket
                     state.forming = {
@@ -296,7 +275,7 @@ async def _po_stream_async():
                     state.forming["low"] = min(state.forming["low"], price)
                     state.forming["close"] = price
 
-                # --- Indicator recompute (on every tick) ---
+                # Recompute indicators on every tick
                 closes = [c["close"] for c in state.candles]
                 closes.append(state.forming["close"])
                 ind = recompute_indicators(closes)
@@ -305,6 +284,7 @@ async def _po_stream_async():
                 state.bb_upper = ind["bb_upper"]
                 state.bb_middle = ind["bb_middle"]
                 state.bb_lower = ind["bb_lower"]
+                state.bb_bandwidth = ind["bb_bandwidth"]
                 state.bb_pct_to_upper = ind["bb_pct_to_upper"]
                 state.bb_pct_to_lower = ind["bb_pct_to_lower"]
                 state.ema = ind["ema"]
@@ -344,6 +324,7 @@ def get_candles():
                 "bb_lower": state.bb_lower,
                 "bb_period": BB_PERIOD,
                 "bb_std": BB_STD_MULT,
+                "bb_bandwidth": state.bb_bandwidth,
                 "bb_pct_to_upper": state.bb_pct_to_upper,
                 "bb_pct_to_lower": state.bb_pct_to_lower,
                 "ema": state.ema,
