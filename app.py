@@ -1,5 +1,5 @@
 """
-Pocket Option NGNUSD_otc Candle Streamer
+Pocket Option EURUSD_otc Candle Streamer
 Runs on Railway, serves candles via HTTP + WebSocket to the frontend.
 """
 
@@ -27,7 +27,7 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "NGNUSD_otc"
+ASSET = "EURUSD_otc"
 TIMEFRAME_SECONDS = 60          # 1 minute candles
 MAX_CANDLES = 2000               # Keep last 2000 candles in memory
 
