@@ -1,5 +1,5 @@
 """
-Pocket Option BITB_otc Candle + Indicator Streamer
+Pocket Option EURGBP_otc Candle + Indicator Streamer
 - Candles built 100% from live ticks (bypasses stale API candles)
 - Real-time RSI(14), Bollinger Bands(20,2), EMA(6)
 - 1-minute timeframe
@@ -26,8 +26,8 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "BITB_otc"
-TIMEFRAME_SECONDS = 60           # 1 minute candles
+ASSET = "EURGBP_otc"
+TIMEFRAME_SECONDS = 10           # 1 minute candles
 HISTORY_CANDLES = 150            # Bootstrap history for indicators
 MAX_CANDLES = 2000
 
