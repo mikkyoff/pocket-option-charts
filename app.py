@@ -1,5 +1,5 @@
 """
-Pocket Option BITB_otc 10s Candle + Indicator Streamer
+Pocket Option PLTR_otc 10s Candle + Indicator Streamer
 - Real-time RSI(14), Bollinger Bands(20,2), EMA(6)
 - Serves candles + indicator values to the frontend via HTTP
 - Designed for Railway (gunicorn + background thread)
@@ -28,7 +28,7 @@ CORS(app)
 # CONFIGURATION
 # ============================================================
 SSID = os.getenv("POCKET_OPTION_SSID")
-ASSET = "BITB_otc"
+ASSET = "PLTR_otc"
 TIMEFRAME_SECONDS = 10           # 10 second candles
 HISTORY_CANDLES = 150            # Bootstrap history for indicators
 MAX_CANDLES = 2000               # Rolling buffer for chart
